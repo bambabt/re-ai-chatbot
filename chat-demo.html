@@ -1,0 +1,170 @@
+<!-- chat-demo.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AI Chatbot — Book Appointments | Bi Bamba</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="antialiased bg-gray-50 text-gray-800">
+
+  <div class="max-w-3xl mx-auto p-6">
+    <header class="flex items-center gap-4 mb-6">
+      <img src="YOUR_LOGO.png" alt="logo" class="w-12 h-12 rounded" />
+      <div>
+        <h1 class="text-2xl font-bold text-blue-700">Bi Bamba — AI Booking Bot</h1>
+        <p class="text-sm text-gray-600">Chat to get help and book a free AI Audit (or property showing).</p>
+      </div>
+    </header>
+
+    <main class="bg-white shadow rounded-lg p-4">
+      <div id="chat" class="space-y-4 h-[60vh] overflow-y-auto p-3">
+        <!-- messages appear here -->
+      </div>
+
+      <form id="chatForm" class="mt-4 flex gap-3">
+        <input id="input" autocomplete="off" placeholder="Say hi — or type 'Book an appointment'..." 
+               class="flex-1 p-3 rounded-lg border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        <button class="bg-blue-600 text-white px-4 py-2 rounded-lg" type="submit">Send</button>
+      </form>
+    </main>
+  </div>
+
+  <template id="msg-user">
+    <div class="flex justify-end">
+      <div class="bg-blue-600 text-white px-4 py-2 rounded-lg max-w-[80%]"></div>
+    </div>
+  </template>
+
+  <template id="msg-bot">
+    <div class="flex justify-start">
+      <div class="bg-gray-100 text-gray-800 px-4 py-2 rounded-lg max-w-[80%]"></div>
+    </div>
+  </template>
+
+  <script>
+    const chatEl = document.getElementById('chat');
+    const form = document.getElementById('chatForm');
+    const input = document.getElementById('input');
+
+    // simple local state for conversation
+    let convo = [
+      { role: 'assistant', content: "Hi! I'm your AI assistant. I can help you book an AI Automation Audit. Ask me anything or type 'Book' to schedule." }
+    ];
+
+    function renderMessage(role, text) {
+      const tpl = document.getElementById(role === 'user' ? 'msg-user' : 'msg-bot');
+      const clone = tpl.content.cloneNode(true);
+      clone.querySelector('div').textContent = text;
+      chatEl.appendChild(clone);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    // initialize chat
+    convo.forEach(m => renderMessage(m.role, m.content));
+
+    async function sendToServer(payload) {
+      // uses the Netlify function at .netlify/functions/chat
+      const res = await fetch('/.netlify/functions/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      return res.json();
+    }
+
+    // helper to ask the bot follow-ups to collect booking info
+    async function handleBookingFlow() {
+      // 1: ask for name
+      renderMessage('bot', 'Great — before I book, what name should I use for the appointment?');
+      // wait for user input function collects below
+      // we will set a short-lived listener to collect the next three inputs
+      const answers = {};
+      const ask = async (questionKey, questionPrompt) => {
+        renderMessage('bot', questionPrompt);
+        const answer = await waitForUserInput();
+        answers[questionKey] = answer;
+        renderMessage('user', answer);
+      };
+
+      await ask('name', "What's your full name?");
+      await ask('email', "What's the best email to send confirmation?");
+      await ask('when', "When would you like the appointment? (give a date & time range, e.g. 'Tuesday 3–4pm')");
+
+      // show summary and ask to confirm
+      renderMessage('bot', `Thanks ${answers.name}! I'll try to book ${answers.when} and send confirmation to ${answers.email}. Confirm and proceed? (yes/no)`);
+
+      const confirmation = await waitForUserInput();
+      renderMessage('user', confirmation);
+
+      if (!/^(y|yes)/i.test(confirmation.trim())) {
+        renderMessage('bot', 'Booking cancelled. Let me know if you want to try again.');
+        return;
+      }
+
+      // send booking action to server
+      renderMessage('bot', 'Booking now — one moment please...');
+      const payload = { action: 'book', name: answers.name, email: answers.email, when: answers.when, context: convo };
+      const serverResp = await sendToServer(payload);
+
+      if (serverResp.error) {
+        renderMessage('bot', 'Sorry — could not create booking: ' + serverResp.error);
+        console.error(serverResp);
+        return;
+      }
+
+      // serverResp should return { success: true, message: 'Booked' , details: {...}, shareUrl: '...' }
+      renderMessage('bot', serverResp.message || 'Booking complete! Check your email for confirmation.');
+      if (serverResp.shareUrl) {
+        renderMessage('bot', 'Shareable link: ' + serverResp.shareUrl);
+      }
+    }
+
+    // wait for next user input event (resolves with input text)
+    function waitForUserInput() {
+      return new Promise(resolve => {
+        const onSubmit = (ev) => {
+          ev.preventDefault();
+          const val = input.value.trim();
+          if (!val) return;
+          input.value = '';
+          form.removeEventListener('submit', onSubmit);
+          resolve(val);
+        };
+        form.addEventListener('submit', onSubmit);
+      });
+    }
+
+    // default behavior: send user's text to AI and render reply
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      renderMessage('user', text);
+
+      // quick intent detection: if user typed "book" or "appointment", start booking flow
+      if (/book|appointment|schedule|meeting/i.test(text)) {
+        // record user message in convo
+        convo.push({ role: 'user', content: text });
+        await handleBookingFlow();
+        return;
+      }
+
+      // otherwise forward to server for AI reply
+      renderMessage('bot', 'Thinking...');
+      const payload = { action: 'chat', message: text, context: convo };
+      const resp = await sendToServer(payload);
+
+      // server returns { reply: '...' } or { error: '...' }
+      if (resp.error) {
+        renderMessage('bot', 'Error: ' + resp.error);
+      } else {
+        const reply = resp.reply || "Sorry, I didn't get that.";
+        renderMessage('bot', reply);
+        convo.push({ role: 'assistant', content: reply });
+      }
+    });
+  </script>
+</body>
+</html>
